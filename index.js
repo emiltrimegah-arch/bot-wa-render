@@ -438,6 +438,11 @@ app.get('/', basicAuth, (req, res) => {
   res.send('<h1 style="text-align:center; padding-top:50px; font-family:sans-serif;">Menyiapkan server & Database... Refresh dalam 5 detik.</h1>');
 });
 
+// Endpoint khusus UptimeRobot (Tanpa Login / Publik)
+app.get('/ping', (req, res) => {
+  res.status(200).send('PONG');
+});
+
 // ==========================================
 // JALANKAN SERVER
 // ==========================================
