@@ -19,10 +19,12 @@ let sock = null;
 let qrCodeData = '';
 let isConnected = false;
 let mongoDb = null;
-let connectionRetryCount = 0; // Counter kegagalan sesi
+let connectionRetryCount = 0;
+let isConnecting = false;     // Guard agar tidak ada koneksi ganda
+let reconnectTimeout = null; // Timer reconnect terpusat
 
 // ==========================================
-// MIDDLEWARE: PROTEKSI HALAMAN (BASIC AUTH)
+// MIDDLEWARE: BASIC AUTH
 // ==========================================
 const basicAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -41,14 +43,14 @@ const basicAuth = (req, res, next) => {
 };
 
 // ==========================================
-// INISIALISASI MONGODB (GLOBAL CONNECT)
+// DATABASE CONNECT
 // ==========================================
 async function connectToMongo() {
-  if (mongoDb) return true; // Gunakan koneksi yang sudah ada
+  if (mongoDb) return true;
 
   const MONGO_URI = process.env.MONGO_URI;
   if (!MONGO_URI) {
-    console.error("⚠️ MONGO_URI belum diatur di Environment Variables!");
+    console.error("⚠️ MONGO_URI belum diatur!");
     return false;
   }
 
@@ -65,7 +67,7 @@ async function connectToMongo() {
 }
 
 // ==========================================
-// FUNGSI PENYIMPANAN SESI WA (MONGODB)
+// AUTH STATE MANAGEMENT
 // ==========================================
 async function useMongoAuthState() {
   const collection = mongoDb.collection('auth_session');
@@ -96,7 +98,6 @@ async function useMongoAuthState() {
 
   let creds = await readData('creds');
 
-  // Hanya impor MY_WA jika VAR-nya masih ada DAN database benar-benar kosong
   if (!creds) {
     if (process.env.MY_WA) {
       try {
@@ -104,7 +105,6 @@ async function useMongoAuthState() {
         console.log('📦 Mengimpor sesi dari MY_WA ke MongoDB...');
         await writeData(creds, 'creds');
       } catch (error) {
-        console.error('Gagal membaca MY_WA, membuat sesi baru...', error);
         creds = initAuthCreds();
       }
     } else {
@@ -158,19 +158,47 @@ function formatToJid(phone) {
   return cleaned;
 }
 
+// Helper Reconnect Terjadwal
+function scheduleReconnect(ms = 3000) {
+  if (reconnectTimeout) clearTimeout(reconnectTimeout);
+  reconnectTimeout = setTimeout(() => {
+    connectToWhatsApp();
+  }, ms);
+}
+
 // ==========================================
 // KONEKSI BOT WHATSAPP
 // ==========================================
 async function connectToWhatsApp() {
+  if (isConnecting) {
+    console.log('⏳ Koneksi sedang diproses, mengabaikan request ganda...');
+    return;
+  }
+  isConnecting = true;
+
+  // Bersihkan socket lama jika ada
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners();
+      sock.end(undefined);
+    } catch (e) { }
+    sock = null;
+  }
+
   const isMongoReady = await connectToMongo();
-  if (!isMongoReady) return;
+  if (!isMongoReady) {
+    isConnecting = false;
+    return;
+  }
 
   const { state, saveCreds } = await useMongoAuthState();
 
   sock = makeWASocket({
     auth: state,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'], // Menjaga stabilitas koneksi di server cloud
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
   });
+
+  isConnecting = false; // Guard dibuka kembali setelah soket siap
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -190,9 +218,8 @@ async function connectToWhatsApp() {
       connectionRetryCount++;
       console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
 
-      // AUTO-HEALING: Bersihkan sesi MongoDB jika loggedOut atau gagal 3x berturut-turut
       if (isLoggedOut || connectionRetryCount >= 3) {
-        console.log('🚨 Sesi tidak valid/corrupt! Menghapus sesi otomatis dari MongoDB...');
+        console.log('🚨 Sesi corrupt/logged out! Menghapus dari MongoDB...');
         if (mongoDb) {
           try {
             await mongoDb.collection('auth_session').deleteMany({});
@@ -203,10 +230,9 @@ async function connectToWhatsApp() {
         }
         connectionRetryCount = 0;
         qrCodeData = '';
-        setTimeout(connectToWhatsApp, 3000);
+        scheduleReconnect(3000);
       } else {
-        console.log('Mencoba terhubung kembali dalam 3 detik...');
-        setTimeout(connectToWhatsApp, 3000);
+        scheduleReconnect(3000);
       }
     } else if (connection === 'open') {
       console.log('✅ WhatsApp Bot Berhasil Terhubung (Sesi Live)!');
@@ -228,6 +254,47 @@ async function connectToWhatsApp() {
 }
 
 connectToWhatsApp();
+
+// ==========================================
+// ENDPOINT DARURAT: RESET SESI
+// ==========================================
+app.get('/reset-session', basicAuth, async (req, res) => {
+  try {
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    isConnecting = false;
+
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners();
+        sock.end(undefined);
+      } catch (e) { }
+      sock = null;
+    }
+
+    if (mongoDb) {
+      await mongoDb.collection('auth_session').deleteMany({});
+      console.log('🧹 Sesi di MongoDB dibersihkan total via Web Reset!');
+    }
+
+    isConnected = false;
+    qrCodeData = '';
+    connectionRetryCount = 0;
+
+    scheduleReconnect(1000);
+
+    return res.send(`
+      <div style="text-align:center; padding-top:50px; font-family:sans-serif;">
+        <h1 style="color:green;">✅ Sesi Berhasil Di-reset Total!</h1>
+        <p>Database sesi lama sudah dibersihkan.</p>
+        <a href="/" style="display:inline-block; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">
+          Klik di sini untuk melihat QR Code Baru
+        </a>
+      </div>
+    `);
+  } catch (err) {
+    return res.status(500).send('Gagal reset sesi: ' + err.message);
+  }
+});
 
 // ==========================================
 // ENDPOINT 1: KIRIM OTP
@@ -313,7 +380,7 @@ app.get('/api/logs', basicAuth, async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 3: HALAMAN UI HISTORY
+// ENDPOINT 3: UI HISTORY
 // ==========================================
 app.get('/history', basicAuth, (req, res) => {
   const html = `
@@ -455,58 +522,30 @@ app.get('/', basicAuth, (req, res) => {
       </div>
     `);
   }
-  res.send('<h1 style="text-align:center; padding-top:50px; font-family:sans-serif;">Menyiapkan server & Database... Refresh dalam 5 detik.</h1>');
+
+  // Menambahkan meta refresh 3 detik otomatis
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta http-equiv="refresh" content="3">
+      <title>Menyiapkan Bot...</title>
+    </head>
+    <body style="text-align:center; font-family:sans-serif; padding-top:50px;">
+      <h1>Menyiapkan server & Database...</h1>
+      <p style="color:#666;">Halaman akan refresh otomatis dalam 3 detik untuk memuat QR Code.</p>
+    </body>
+    </html>
+  `);
 });
 
-// ==========================================
-// ENDPOINT DARURAT: RESET SESI WHATSAPP
-// ==========================================
-app.get('/reset-session', basicAuth, async (req, res) => {
-  try {
-    // 1. Putuskan socket lama jika ada
-    if (sock) {
-      try {
-        sock.ev.removeAllListeners();
-        sock.end(undefined);
-      } catch (e) { }
-      sock = null;
-    }
-
-    // 2. Paksa hapus tabel auth_session di MongoDB
-    if (mongoDb) {
-      await mongoDb.collection('auth_session').deleteMany({});
-      console.log('🧹 Sesi lama di MongoDB berhasil dihapus total!');
-    }
-
-    // 3. Reset variabel status
-    isConnected = false;
-    qrCodeData = '';
-    connectionRetryCount = 0;
-
-    // 4. Minta bot terhubung ulang sebagai sesi baru
-    setTimeout(connectToWhatsApp, 1000);
-
-    return res.send(`
-      <div style="text-align:center; padding-top:50px; font-family:sans-serif;">
-        <h1 style="color:green;">✅ Sesi Berhasil Di-reset Total!</h1>
-        <p>Database sesi lama sudah dibersihkan.</p>
-        <a href="/" style="display:inline-block; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">
-          Klik di sini untuk Scan QR Code Baru
-        </a>
-      </div>
-    `);
-  } catch (err) {
-    return res.status(500).send('Gagal reset sesi: ' + err.message);
-  }
-});
-
-// Endpoint khusus UptimeRobot
+// Endpoint UptimeRobot
 app.get('/ping', (req, res) => {
   res.status(200).send('PONG');
 });
 
 // ==========================================
-// JALANKAN SERVER
+// START SERVER
 // ==========================================
 app.listen(PORT, () => {
   console.log(`Server berjalan di port ${PORT}`);
