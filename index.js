@@ -254,6 +254,9 @@ async function connectToWhatsApp() {
       isConnected = true;
       qrCodeData = '';
       connectionRetryCount = 0;
+
+      // PAKSA STATUS MENJADI OFFLINE / UNAVAILABLE
+      await sock.sendPresenceUpdate('unavailable');
     }
   });
 
