@@ -19,35 +19,33 @@ let sock = null;
 let qrCodeData = '';
 let isConnected = false;
 let mongoDb = null;
+let connectionRetryCount = 0; // Counter kegagalan sesi
 
 // ==========================================
 // MIDDLEWARE: PROTEKSI HALAMAN (BASIC AUTH)
 // ==========================================
 const basicAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
-  // Default: admin / rahasia123 jika environment belum di-set
   const ADMIN_USER = process.env.ADMIN_USER || 'admin';
   const ADMIN_PASS = process.env.ADMIN_PASS || 'rahasia123';
 
   if (authHeader) {
     const auth = Buffer.from(authHeader.split(' ')[1], 'base64').toString().split(':');
-    const user = auth[0];
-    const pass = auth[1];
-
-    if (user === ADMIN_USER && pass === ADMIN_PASS) {
-      return next(); // Lanjut jika password benar
+    if (auth[0] === ADMIN_USER && auth[1] === ADMIN_PASS) {
+      return next();
     }
   }
 
-  // Jika salah/belum login, paksa browser munculkan pop-up login
   res.setHeader('WWW-Authenticate', 'Basic realm="Akses Terproteksi"');
   return res.status(401).send('<h1>Akses Ditolak! Username atau Password salah.</h1>');
 };
 
 // ==========================================
-// INISIALISASI MONGODB
+// INISIALISASI MONGODB (GLOBAL CONNECT)
 // ==========================================
 async function connectToMongo() {
+  if (mongoDb) return true; // Gunakan koneksi yang sudah ada
+
   const MONGO_URI = process.env.MONGO_URI;
   if (!MONGO_URI) {
     console.error("⚠️ MONGO_URI belum diatur di Environment Variables!");
@@ -98,17 +96,19 @@ async function useMongoAuthState() {
 
   let creds = await readData('creds');
 
-  // Migrasi MY_WA jika database masih kosong
+  // Hanya impor MY_WA jika VAR-nya masih ada DAN database benar-benar kosong
   if (!creds) {
     if (process.env.MY_WA) {
       try {
         creds = JSON.parse(process.env.MY_WA, BufferJSON.reviver);
-        console.log('✅ Migrasi sesi dari MY_WA ke MongoDB berhasil!');
+        console.log('📦 Mengimpor sesi dari MY_WA ke MongoDB...');
         await writeData(creds, 'creds');
       } catch (error) {
+        console.error('Gagal membaca MY_WA, membuat sesi baru...', error);
         creds = initAuthCreds();
       }
     } else {
+      console.log('🆕 Sesi kosong. Menyiapkan QR Code baru...');
       creds = initAuthCreds();
     }
   }
@@ -161,8 +161,6 @@ function formatToJid(phone) {
 // ==========================================
 // KONEKSI BOT WHATSAPP
 // ==========================================
-let connectionRetryCount = 0; // Counter untuk mendeteksi sesi rusak
-
 async function connectToWhatsApp() {
   const isMongoReady = await connectToMongo();
   if (!isMongoReady) return;
@@ -171,7 +169,7 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'], // Menjaga stabilitas koneksi di server cloud
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -180,6 +178,7 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      console.log('📸 QR Code Baru Berhasil Dibuat!');
       qrCodeData = await QRCode.toDataURL(qr);
     }
 
@@ -191,29 +190,29 @@ async function connectToWhatsApp() {
       connectionRetryCount++;
       console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
 
-      // OTOMATISASI: Jika ter-logout ATAU gagal 3x berturut-turut (sesi corrupt)
+      // AUTO-HEALING: Bersihkan sesi MongoDB jika loggedOut atau gagal 3x berturut-turut
       if (isLoggedOut || connectionRetryCount >= 3) {
         console.log('🚨 Sesi tidak valid/corrupt! Menghapus sesi otomatis dari MongoDB...');
         if (mongoDb) {
           try {
             await mongoDb.collection('auth_session').deleteMany({});
-            console.log('🗑️ Sesi MongoDB berhasil dibersihkan! Menyiapkan QR Code baru...');
+            console.log('🗑️ Sesi MongoDB berhasil dibersihkan!');
           } catch (err) {
             console.error('Gagal membersihkan sesi:', err);
           }
         }
-        connectionRetryCount = 0; // Reset counter
-        qrCodeData = '';          // Reset QR
-        setTimeout(connectToWhatsApp, 2000); // Reconnect dengan sesi bersih
+        connectionRetryCount = 0;
+        qrCodeData = '';
+        setTimeout(connectToWhatsApp, 3000);
       } else {
-        console.log('Mencoba terhubung kembali...');
-        setTimeout(connectToWhatsApp, 2000);
+        console.log('Mencoba terhubung kembali dalam 3 detik...');
+        setTimeout(connectToWhatsApp, 3000);
       }
     } else if (connection === 'open') {
       console.log('✅ WhatsApp Bot Berhasil Terhubung (Sesi Live)!');
       isConnected = true;
       qrCodeData = '';
-      connectionRetryCount = 0; // Reset counter jika sukses
+      connectionRetryCount = 0;
     }
   });
 
@@ -231,7 +230,7 @@ async function connectToWhatsApp() {
 connectToWhatsApp();
 
 // ==========================================
-// ENDPOINT 1: KIRIM OTP (Terbuka untuk API Backend-mu)
+// ENDPOINT 1: KIRIM OTP
 // ==========================================
 app.post('/send-otp', async (req, res) => {
   const { phone, otp, secretKey } = req.body;
@@ -281,7 +280,7 @@ app.post('/send-otp', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 2: API DATA LOGS (Dilindungi Basic Auth)
+// ENDPOINT 2: API DATA LOGS
 // ==========================================
 app.get('/api/logs', basicAuth, async (req, res) => {
   if (!mongoDb) return res.status(500).json({ error: 'Database belum siap' });
@@ -314,7 +313,7 @@ app.get('/api/logs', basicAuth, async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 3: HALAMAN UI HISTORY (Dilindungi Basic Auth)
+// ENDPOINT 3: HALAMAN UI HISTORY
 // ==========================================
 app.get('/history', basicAuth, (req, res) => {
   const html = `
@@ -376,7 +375,6 @@ app.get('/history', basicAuth, (req, res) => {
           const search = document.getElementById('searchInput').value;
           
           try {
-            // credentials: 'same-origin' memastikan login Basic Auth terbawa ke API
             const res = await fetch(\`/api/logs?page=\${page}&limit=10&search=\${search}\`, {
               credentials: 'same-origin'
             });
@@ -426,7 +424,7 @@ app.get('/history', basicAuth, (req, res) => {
           }
         }
 
-        fetchLogs(1); // Load pertama kali
+        fetchLogs(1);
       </script>
     </body>
     </html>
@@ -435,7 +433,7 @@ app.get('/history', basicAuth, (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 4: HALAMAN UTAMA / QR CODE (Dilindungi Basic Auth)
+// ENDPOINT 4: HALAMAN UTAMA / QR CODE
 // ==========================================
 app.get('/', basicAuth, (req, res) => {
   if (isConnected) {
@@ -460,7 +458,7 @@ app.get('/', basicAuth, (req, res) => {
   res.send('<h1 style="text-align:center; padding-top:50px; font-family:sans-serif;">Menyiapkan server & Database... Refresh dalam 5 detik.</h1>');
 });
 
-// Endpoint khusus UptimeRobot (Tanpa Login / Publik)
+// Endpoint khusus UptimeRobot
 app.get('/ping', (req, res) => {
   res.status(200).send('PONG');
 });
