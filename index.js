@@ -6,7 +6,9 @@ const {
   initAuthCreds,
   BufferJSON,
   proto,
-  DisconnectReason
+  DisconnectReason,
+  fetchLatestBaileysVersion, // <-- TAMBAHKAN INI
+  Browsers                   // <-- TAMBAHKAN INI
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 const QRCode = require('qrcode');
@@ -188,19 +190,30 @@ async function connectToWhatsApp() {
   const isMongoReady = await connectToMongo();
   if (!isMongoReady) {
     isConnecting = false;
-    console.log('⚠️ MongoDB gagal, akan retry dalam 5 detik...');
-    scheduleReconnect(5000);
     return;
   }
 
   const { state, saveCreds } = await useMongoAuthState();
 
+  // 1. Ambil versi WhatsApp Web resmi yang paling baru
+  let version = [2, 3000, 1015901307]; // fallback default
+  try {
+    const latest = await fetchLatestBaileysVersion();
+    version = latest.version;
+    console.log(`ℹ️ Menggunakan WA Web v${version.join('.')}`);
+  } catch (err) {
+    console.log('⚠️ Gagal mengambil versi WA terbaru, menggunakan versi fallback');
+  }
+
+  // 2. Inisialisasi Socket dengan Versi + Browser Bawaan Baileys
   sock = makeWASocket({
+    version,
     auth: state,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers.ubuntu('Chrome'), // Gunakan signature resmi Baileys
+    syncFullHistory: false,             // Matikan sync riwayat pesan berat
   });
 
-  isConnecting = false; // Guard dibuka kembali setelah soket siap
+  isConnecting = false;
 
   sock.ev.on('creds.update', saveCreds);
 
