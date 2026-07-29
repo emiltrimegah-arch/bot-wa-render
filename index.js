@@ -161,6 +161,8 @@ function formatToJid(phone) {
 // ==========================================
 // KONEKSI BOT WHATSAPP
 // ==========================================
+let connectionRetryCount = 0; // Counter untuk mendeteksi sesi rusak
+
 async function connectToWhatsApp() {
   const isMongoReady = await connectToMongo();
   if (!isMongoReady) return;
@@ -182,16 +184,36 @@ async function connectToWhatsApp() {
     }
 
     if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-      console.log('Koneksi terputus, mencoba terhubung kembali...', shouldReconnect);
       isConnected = false;
-      if (shouldReconnect) {
-        connectToWhatsApp();
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+      connectionRetryCount++;
+      console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
+
+      // OTOMATISASI: Jika ter-logout ATAU gagal 3x berturut-turut (sesi corrupt)
+      if (isLoggedOut || connectionRetryCount >= 3) {
+        console.log('🚨 Sesi tidak valid/corrupt! Menghapus sesi otomatis dari MongoDB...');
+        if (mongoDb) {
+          try {
+            await mongoDb.collection('auth_session').deleteMany({});
+            console.log('🗑️ Sesi MongoDB berhasil dibersihkan! Menyiapkan QR Code baru...');
+          } catch (err) {
+            console.error('Gagal membersihkan sesi:', err);
+          }
+        }
+        connectionRetryCount = 0; // Reset counter
+        qrCodeData = '';          // Reset QR
+        setTimeout(connectToWhatsApp, 2000); // Reconnect dengan sesi bersih
+      } else {
+        console.log('Mencoba terhubung kembali...');
+        setTimeout(connectToWhatsApp, 2000);
       }
     } else if (connection === 'open') {
-      console.log('WhatsApp Bot Berhasil Terhubung (Sesi MongoDB Live)!');
+      console.log('✅ WhatsApp Bot Berhasil Terhubung (Sesi Live)!');
       isConnected = true;
       qrCodeData = '';
+      connectionRetryCount = 0; // Reset counter jika sukses
     }
   });
 
