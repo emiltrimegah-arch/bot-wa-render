@@ -188,6 +188,8 @@ async function connectToWhatsApp() {
   const isMongoReady = await connectToMongo();
   if (!isMongoReady) {
     isConnecting = false;
+    console.log('⚠️ MongoDB gagal, akan retry dalam 5 detik...');
+    scheduleReconnect(5000);
     return;
   }
 
@@ -274,6 +276,7 @@ app.get('/reset-session', basicAuth, async (req, res) => {
     if (mongoDb) {
       await mongoDb.collection('auth_session').deleteMany({});
       console.log('🧹 Sesi di MongoDB dibersihkan total via Web Reset!');
+      mongoDb = null; // Force reconnect fresh ke MongoDB
     }
 
     isConnected = false;
