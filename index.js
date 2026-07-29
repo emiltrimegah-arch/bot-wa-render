@@ -458,6 +458,48 @@ app.get('/', basicAuth, (req, res) => {
   res.send('<h1 style="text-align:center; padding-top:50px; font-family:sans-serif;">Menyiapkan server & Database... Refresh dalam 5 detik.</h1>');
 });
 
+// ==========================================
+// ENDPOINT DARURAT: RESET SESI WHATSAPP
+// ==========================================
+app.get('/reset-session', basicAuth, async (req, res) => {
+  try {
+    // 1. Putuskan socket lama jika ada
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners();
+        sock.end(undefined);
+      } catch (e) { }
+      sock = null;
+    }
+
+    // 2. Paksa hapus tabel auth_session di MongoDB
+    if (mongoDb) {
+      await mongoDb.collection('auth_session').deleteMany({});
+      console.log('🧹 Sesi lama di MongoDB berhasil dihapus total!');
+    }
+
+    // 3. Reset variabel status
+    isConnected = false;
+    qrCodeData = '';
+    connectionRetryCount = 0;
+
+    // 4. Minta bot terhubung ulang sebagai sesi baru
+    setTimeout(connectToWhatsApp, 1000);
+
+    return res.send(`
+      <div style="text-align:center; padding-top:50px; font-family:sans-serif;">
+        <h1 style="color:green;">✅ Sesi Berhasil Di-reset Total!</h1>
+        <p>Database sesi lama sudah dibersihkan.</p>
+        <a href="/" style="display:inline-block; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">
+          Klik di sini untuk Scan QR Code Baru
+        </a>
+      </div>
+    `);
+  } catch (err) {
+    return res.status(500).send('Gagal reset sesi: ' + err.message);
+  }
+});
+
 // Endpoint khusus UptimeRobot
 app.get('/ping', (req, res) => {
   res.status(200).send('PONG');
