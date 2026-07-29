@@ -168,6 +168,29 @@ function scheduleReconnect(ms = 3000) {
   }, ms);
 }
 
+let hasSentDisconnectAlert = false; // Mencegah spam notifikasi saat reconnecting
+
+async function sendTelegramAlert(text) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!botToken || !chatId) return;
+
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        parse_mode: 'Markdown'
+      })
+    });
+    console.log('🔔 Alert berhasil dikirim ke Telegram');
+  } catch (err) {
+    console.error('❌ Gagal mengirim alert ke Telegram:', err.message);
+  }
+}
+
 // ==========================================
 // KONEKSI BOT WHATSAPP
 // ==========================================
@@ -233,6 +256,15 @@ async function connectToWhatsApp() {
       connectionRetryCount++;
       console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
 
+      // SEND ALERT KE TELEGRAM (Dikirim 1x saat pertama terputus)
+      if (!hasSentDisconnectAlert) {
+        hasSentDisconnectAlert = true;
+        const appUrl = process.env.APP_URL || 'https://bot-wa-render.onrender.com';
+        sendTelegramAlert(
+          `🚨 *[WA BOT ALERT]*\nKoneksi WhatsApp Bot terputus!\n\nSilakan cek status atau scan ulang QR Code di:\n👉 ${appUrl}`
+        );
+      }
+
       if (isLoggedOut || connectionRetryCount >= 3) {
         console.log('🚨 Sesi corrupt/logged out! Menghapus dari MongoDB...');
         if (mongoDb) {
@@ -255,8 +287,13 @@ async function connectToWhatsApp() {
       qrCodeData = '';
       connectionRetryCount = 0;
 
-      // PAKSA STATUS MENJADI OFFLINE / UNAVAILABLE
-      await sock.sendPresenceUpdate('unavailable');
+      // SEND NOTIFIKASI PEMULIHAN
+      if (hasSentDisconnectAlert) {
+        sendTelegramAlert('✅ *[WA BOT RESTORED]*\nWhatsApp Bot sudah berhasil terhubung kembali!');
+        hasSentDisconnectAlert = false; // Reset flag
+      }
+
+      await sock.sendPresenceUpdate('unavailable'); // Tetap offline/tersembunyi
     }
   });
 
