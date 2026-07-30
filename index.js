@@ -288,9 +288,16 @@ async function connectToWhatsApp() {
       isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const isReplaced = statusCode === DisconnectReason.connectionReplaced || statusCode === 440;
 
-      connectionRetryCount++;
       console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
+
+      // PENJAGA: Jika ditendang karena ada proses/container baru yang terhubung (Status 440)
+      // JANGAN reconnect agar tidak terjadi perang saling tendang!
+      if (isReplaced) {
+        console.log('🛑 Koneksi digantikan oleh proses lain. Auto-reconnect dihentikan untuk instance ini.');
+        return;
+      }
 
       // Telegram Alert (Otomatis dicek via Lock MongoDB)
       triggerTelegramAlert('DISCONNECT');
