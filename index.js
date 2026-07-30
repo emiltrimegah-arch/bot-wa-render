@@ -200,7 +200,7 @@ async function sendTelegramAlert(text, retries = 3) {
   }
 }
 
-// Helper Atomic Lock via MongoDB (Mencegah Double Alert saat Zero-Downtime Deploy)
+// Helper Atomic Lock via MongoDB (Anti Double Alert & Anti E11000 Duplicate Key Error)
 async function triggerTelegramAlert(type) {
   const targetState = (type === 'DISCONNECT'); // true jika terputus, false jika restored
   const appUrl = process.env.APP_URL || 'https://bot-wa-render.onrender.com';
@@ -214,13 +214,18 @@ async function triggerTelegramAlert(type) {
   }
 
   try {
-    const result = await mongoDb.collection('bot_status').updateOne(
-      { _id: 'alert_state', isDisconnected: { $ne: targetState } },
+    // 1. Query HANYA menggunakan _id agar aman saat upsert
+    const oldDoc = await mongoDb.collection('bot_status').findOneAndUpdate(
+      { _id: 'alert_state' },
       { $set: { isDisconnected: targetState, updatedAt: new Date() } },
-      { upsert: true }
+      { upsert: true, returnDocument: 'before' }
     );
 
-    if (result.modifiedCount > 0 || result.upsertedCount > 0) {
+    // 2. Cek status sebelum update dilakukan
+    const previousState = oldDoc ? oldDoc.isDisconnected : null;
+
+    // 3. Hanya kirim Telegram jika ada PERUBAHAN STATUS dari kondisi sebelumnya
+    if (previousState !== targetState) {
       await sendTelegramAlert(message);
     } else {
       console.log(`🔇 Alert [${type}] diabaikan (sudah dikirim oleh instance lain).`);
