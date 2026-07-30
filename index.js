@@ -7,8 +7,8 @@ const {
   BufferJSON,
   proto,
   DisconnectReason,
-  fetchLatestBaileysVersion, // <-- TAMBAHKAN INI
-  Browsers                   // <-- TAMBAHKAN INI
+  fetchLatestBaileysVersion,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 const QRCode = require('qrcode');
@@ -22,11 +22,11 @@ let qrCodeData = '';
 let isConnected = false;
 let mongoDb = null;
 let connectionRetryCount = 0;
-let isConnecting = false;     // Guard agar tidak ada koneksi ganda
+let isConnecting = false;     // Guard koneksi ganda
 let reconnectTimeout = null; // Timer reconnect terpusat
 
 // ==========================================
-// MIDDLEWARE: BASIC AUTH
+// MIDDLEWARE: PROTEKSI HALAMAN (BASIC AUTH)
 // ==========================================
 const basicAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -45,14 +45,14 @@ const basicAuth = (req, res, next) => {
 };
 
 // ==========================================
-// DATABASE CONNECT
+// INISIALISASI DATABASE MONGODB
 // ==========================================
 async function connectToMongo() {
   if (mongoDb) return true;
 
   const MONGO_URI = process.env.MONGO_URI;
   if (!MONGO_URI) {
-    console.error("⚠️ MONGO_URI belum diatur!");
+    console.error("⚠️ MONGO_URI belum diatur di Environment Variables!");
     return false;
   }
 
@@ -69,7 +69,7 @@ async function connectToMongo() {
 }
 
 // ==========================================
-// AUTH STATE MANAGEMENT
+// SESI WHATSAPP DILINDUNGI MONGODB
 // ==========================================
 async function useMongoAuthState() {
   const collection = mongoDb.collection('auth_session');
@@ -149,6 +149,9 @@ async function useMongoAuthState() {
   };
 }
 
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
 function formatToJid(phone) {
   let cleaned = phone.toString().replace(/\D/g, '');
   if (cleaned.startsWith('0')) {
@@ -160,7 +163,6 @@ function formatToJid(phone) {
   return cleaned;
 }
 
-// Helper Reconnect Terjadwal
 function scheduleReconnect(ms = 3000) {
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   reconnectTimeout = setTimeout(() => {
@@ -168,8 +170,7 @@ function scheduleReconnect(ms = 3000) {
   }, ms);
 }
 
-let hasSentDisconnectAlert = false; // Mencegah spam notifikasi saat reconnecting
-
+// Telegram Alert dengan Retry 3x
 async function sendTelegramAlert(text, retries = 3) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -187,15 +188,45 @@ async function sendTelegramAlert(text, retries = 3) {
         })
       });
       console.log('🔔 Alert berhasil dikirim ke Telegram');
-      return; // Berhasil, keluar dari loop
+      return;
     } catch (err) {
       if (attempt < retries) {
-        console.log(`⚠️ Telegram fetch gagal, mencoba lagi dalam 2 detik... (Percobaan ${attempt})`);
-        await new Promise(res => setTimeout(res, 2000)); // Tunggu 2 detik lalu coba lagi
+        console.log(`⚠️ Telegram fetch gagal, mencoba lagi dalam 2 detik... (Percobaan ${attempt}/${retries})`);
+        await new Promise(res => setTimeout(res, 2000));
       } else {
-        console.error('❌ Gagal mengirim alert ke Telegram setelah retry:', err.message);
+        console.error('❌ Gagal mengirim alert ke Telegram setelah 3x percobaan:', err.message);
       }
     }
+  }
+}
+
+// Helper Atomic Lock via MongoDB (Mencegah Double Alert saat Zero-Downtime Deploy)
+async function triggerTelegramAlert(type) {
+  const targetState = (type === 'DISCONNECT'); // true jika terputus, false jika restored
+  const appUrl = process.env.APP_URL || 'https://bot-wa-render.onrender.com';
+
+  const message = targetState
+    ? `🚨 *[WA BOT ALERT]*\nKoneksi WhatsApp Bot terputus!\n\nSilakan cek status atau scan ulang QR Code di:\n👉 ${appUrl}`
+    : `✅ *[WA BOT RESTORED]*\nWhatsApp Bot sudah berhasil terhubung kembali!`;
+
+  if (!mongoDb) {
+    return sendTelegramAlert(message);
+  }
+
+  try {
+    const result = await mongoDb.collection('bot_status').updateOne(
+      { _id: 'alert_state', isDisconnected: { $ne: targetState } },
+      { $set: { isDisconnected: targetState, updatedAt: new Date() } },
+      { upsert: true }
+    );
+
+    if (result.modifiedCount > 0 || result.upsertedCount > 0) {
+      await sendTelegramAlert(message);
+    } else {
+      console.log(`🔇 Alert [${type}] diabaikan (sudah dikirim oleh instance lain).`);
+    }
+  } catch (err) {
+    console.error('Gagal memproses lock alert MongoDB:', err.message);
   }
 }
 
@@ -209,7 +240,6 @@ async function connectToWhatsApp() {
   }
   isConnecting = true;
 
-  // Bersihkan socket lama jika ada
   if (sock) {
     try {
       sock.ev.removeAllListeners();
@@ -226,8 +256,7 @@ async function connectToWhatsApp() {
 
   const { state, saveCreds } = await useMongoAuthState();
 
-  // 1. Ambil versi WhatsApp Web resmi yang paling baru
-  let version = [2, 3000, 1015901307]; // fallback default
+  let version = [2, 3000, 1015901307];
   try {
     const latest = await fetchLatestBaileysVersion();
     version = latest.version;
@@ -236,12 +265,11 @@ async function connectToWhatsApp() {
     console.log('⚠️ Gagal mengambil versi WA terbaru, menggunakan versi fallback');
   }
 
-  // 2. Inisialisasi Socket dengan Versi + Browser Bawaan Baileys
   sock = makeWASocket({
     version,
     auth: state,
-    browser: Browsers.ubuntu('Chrome'), // Gunakan signature resmi Baileys
-    syncFullHistory: false,             // Matikan sync riwayat pesan berat
+    browser: Browsers.ubuntu('Chrome'),
+    syncFullHistory: false,
   });
 
   isConnecting = false;
@@ -264,14 +292,8 @@ async function connectToWhatsApp() {
       connectionRetryCount++;
       console.log(`⚠️ Koneksi terputus (Gagal ke-${connectionRetryCount}). Status: ${statusCode}`);
 
-      // SEND ALERT KE TELEGRAM (Dikirim 1x saat pertama terputus)
-      if (!hasSentDisconnectAlert) {
-        hasSentDisconnectAlert = true;
-        const appUrl = process.env.APP_URL || 'https://bot-wa-render.onrender.com';
-        sendTelegramAlert(
-          `🚨 *[WA BOT ALERT]*\nKoneksi WhatsApp Bot terputus!\n\nSilakan cek status atau scan ulang QR Code di:\n👉 ${appUrl}`
-        );
-      }
+      // Telegram Alert (Otomatis dicek via Lock MongoDB)
+      triggerTelegramAlert('DISCONNECT');
 
       if (isLoggedOut || connectionRetryCount >= 3) {
         console.log('🚨 Sesi corrupt/logged out! Menghapus dari MongoDB...');
@@ -295,13 +317,10 @@ async function connectToWhatsApp() {
       qrCodeData = '';
       connectionRetryCount = 0;
 
-      // SEND NOTIFIKASI PEMULIHAN
-      if (hasSentDisconnectAlert) {
-        sendTelegramAlert('✅ *[WA BOT RESTORED]*\nWhatsApp Bot sudah berhasil terhubung kembali!');
-        hasSentDisconnectAlert = false; // Reset flag
-      }
+      // Telegram Restored (Otomatis dicek via Lock MongoDB)
+      triggerTelegramAlert('RESTORED');
 
-      await sock.sendPresenceUpdate('unavailable'); // Tetap offline/tersembunyi
+      await sock.sendPresenceUpdate('unavailable'); // Tetap tersembunyi/offline
     }
   });
 
@@ -337,7 +356,6 @@ app.get('/reset-session', basicAuth, async (req, res) => {
     if (mongoDb) {
       await mongoDb.collection('auth_session').deleteMany({});
       console.log('🧹 Sesi di MongoDB dibersihkan total via Web Reset!');
-      mongoDb = null; // Force reconnect fresh ke MongoDB
     }
 
     isConnected = false;
@@ -444,7 +462,7 @@ app.get('/api/logs', basicAuth, async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 3: UI HISTORY
+// ENDPOINT 3: HALAMAN UI HISTORY
 // ==========================================
 app.get('/history', basicAuth, (req, res) => {
   const html = `
@@ -587,7 +605,6 @@ app.get('/', basicAuth, (req, res) => {
     `);
   }
 
-  // Menambahkan meta refresh 3 detik otomatis
   res.send(`
     <!DOCTYPE html>
     <html>
