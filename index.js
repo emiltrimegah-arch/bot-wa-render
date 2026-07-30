@@ -170,24 +170,32 @@ function scheduleReconnect(ms = 3000) {
 
 let hasSentDisconnectAlert = false; // Mencegah spam notifikasi saat reconnecting
 
-async function sendTelegramAlert(text) {
+async function sendTelegramAlert(text, retries = 3) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!botToken || !chatId) return;
 
-  try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: 'Markdown'
-      })
-    });
-    console.log('🔔 Alert berhasil dikirim ke Telegram');
-  } catch (err) {
-    console.error('❌ Gagal mengirim alert ke Telegram:', err.message);
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: text,
+          parse_mode: 'Markdown'
+        })
+      });
+      console.log('🔔 Alert berhasil dikirim ke Telegram');
+      return; // Berhasil, keluar dari loop
+    } catch (err) {
+      if (attempt < retries) {
+        console.log(`⚠️ Telegram fetch gagal, mencoba lagi dalam 2 detik... (Percobaan ${attempt})`);
+        await new Promise(res => setTimeout(res, 2000)); // Tunggu 2 detik lalu coba lagi
+      } else {
+        console.error('❌ Gagal mengirim alert ke Telegram setelah retry:', err.message);
+      }
+    }
   }
 }
 
